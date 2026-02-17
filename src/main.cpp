@@ -1,4 +1,46 @@
-
+/**
+ * @file main.cpp
+ * @brief CADSE v5 Space Electronics Satellite Control System
+ * @author Floyd DSouza
+ * @date 2025
+ * @version 2.0
+ *
+ * @details
+ * This is the main firmware for the CADSE (Computer-Aided Design and Software Engineering)
+ * v5 satellite platform - an ESP32-S3 based educational system that simulates space
+ * electronics and satellite operations.
+ *
+ * @section features Key Features
+ * - **Six Operational Modes**: Each with unique monitoring and control functions
+ * - **MQTT Telemetry**: Real-time sensor data streaming to ground station
+ * - **WiFi Connectivity**: WiFi-based command and telemetry data links
+ * - **Environmental Monitoring**: Temperature, humidity, pressure sensors
+ * - **Inertial Measurement**: Simulated acceleration and angular rate data
+ * - **OTA Updates**: Over-the-air firmware updates support
+ * - **Persistent Storage**: Non-volatile memory for default mode configuration
+ * - **Touch Interface**: Capacitive touch buttons for user interaction
+ *
+ * @section modes Operational Modes
+ * - **Mode 0**: Basic Monitoring - System status and connectivity
+ * - **Mode 1**: Micro-Gravity Detection - Simulated free-fall detection
+ * - **Mode 2**: Pressure Monitoring - Cabin integrity with cat safety alerts
+ * - **Mode 3**: Attitude Indicator - Artificial horizon for landing
+ * - **Mode 4**: Rolling Plotter - Real-time environmental data visualization
+ * - **Mode 5**: Orbit Simulator - Creative satellite orbit visualization
+ *
+ * @section communication Communication Protocol
+ * - MQTT Server: heide.bastla.net:8883 (TLS encrypted)
+ * - Topics: cadse/2024/{boardId}/tm (telemetry), /tc (commands), /response
+ * - Telemetry Interval: 1 second continuous in all modes
+ *
+ * @section hardware Hardware Interface
+ * - MCU: ESP32-S3 with WiFi/BLE capabilities
+ * - Display: SSD1306 OLED (128x64 pixels) via I2C
+ * - Sensors: BME280 environmental sensor (I2C)
+ * - Power Monitoring: Battery and USB voltage measurement via ADC
+ * - Actuators: Buzzer (PWM), LED (GPIO)
+ * - Input: 5 Capacitive touch buttons
+ */
 
  #include <Arduino.h>
  #include <Wire.h>
@@ -12,6 +54,7 @@
  #include <Adafruit_BME280.h>
  #include <ArduinoOTA.h>
  #include <Preferences.h>  // Added for persistent storage
+ #include "modes.h"  // Satellite operational modes
   
 
  #define SCREEN_WIDTH 128      
@@ -366,13 +409,26 @@ void loop() {
  }
   
 
+/**
+ * @brief Initialize WiFi connection
+ *
+ * Establishes WiFi connection to the configured SSID. Displays connection
+ * progress on OLED and reports status to serial console. Connection timeout
+ * is set to approximately 10 seconds (20 attempts with 500ms delay).
+ *
+ * @details
+ * - Attempts connection with configured SSID and password
+ * - Displays progress dots on OLED during connection
+ * - Shows IP address upon successful connection
+ * - Allows system to continue even if WiFi fails
+ */
 void setupWiFi() {
    display.clearDisplay();
    display.setCursor(0, 0);
    display.println("Connecting to WiFi");
    display.println(WIFI_SSID);
    display.display();
-   
+
    Serial.print("\nAttempting Wi-Fi connection to ");
    Serial.println(WIFI_SSID);
    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -406,11 +462,29 @@ void setupWiFi() {
  }
   
 
+/**
+ * @brief Switch satellite to a new operational mode
+ *
+ * Changes the satellite's operational mode and provides user feedback
+ * via audio (buzzer beeps) and visual (OLED display). The number of
+ * buzzer beeps corresponds to the mode number (0 beeps for Mode 0,
+ * 1 beep for Mode 1, etc.) as specified in requirements R3.1.
+ *
+ * @param newMode Target mode number (0-5)
+ * @return void
+ * @details
+ * - Validates mode number (0-5)
+ * - Updates global currentMode variable
+ * - Produces audio feedback via buzzer
+ * - Updates OLED display with new mode information
+ *
+ * @note Satisfies requirements R3 and R3.1
+ */
 void switchMode(int newMode) {
    if (newMode < 0 || newMode > 5) {
      return; // Invalid mode
    }
-   
+
    currentMode = newMode;
    Serial.print("Switching to mode ");
    Serial.println(currentMode);
@@ -426,24 +500,53 @@ void switchMode(int newMode) {
  }
   
 
+/**
+ * @brief Initialize MQTT messaging system
+ *
+ * Configures secure MQTT connection to the ground station broker.
+ * Disables certificate verification for educational purposes to simplify
+ * deployment. Establishes initial connection to broker.
+ *
+ * @details
+ * Configuration:
+ * - Server: heide.bastla.net
+ * - Port: 8883 (MQTT over TLS)
+ * - QoS: Default (0 - At most once)
+ * - User: mse24
+ * - Subscribe: cadse/2024/{boardId}/tc (command topic)
+ * - Publish: cadse/2024/{boardId}/tm (telemetry), /response
+ */
 void setupMQTT() {
    // Set the client to insecure mode - bypass certificate verification
    wifiClient.setInsecure();
-   
+
    // Configure broker connection
    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
    mqttClient.setCallback(handleMQTTCallback);
-   
+
    reconnectMQTT();
  }
   
 
+/**
+ * @brief Initialize BME280 environmental sensor
+ *
+ * Configures the BME280 sensor via I2C (address 0x76). This sensor provides
+ * temperature, humidity, pressure, and altitude measurements. Sensor
+ * initialization status is displayed on OLED.
+ *
+ * @details
+ * - I2C Address: 0x76
+ * - Provides: Temperature, Humidity, Pressure, Altitude
+ * - Used by: Mode 2 (Pressure), Mode 4 (Plotter), Telemetry
+ * - Failure is non-critical; system continues without sensor data
+ */
 void setupBME280() {
    display.clearDisplay();
    display.setCursor(0, 0);
    display.println("Initializing BME280...");
    display.display();
-   
+
    unsigned status = bme.begin(0x76);
    if (!status) {
      Serial.println("Could not find a valid BME280 sensor!");
@@ -535,10 +638,28 @@ void setupOTA() {
  }
   
 
+/**
+ * @brief Retrieve and display ESP32 chip information
+ *
+ * Queries the ESP32 for hardware specifications including chip model,
+ * cores, revision, unique chip ID, flash size, and available heap memory.
+ * This information is logged to serial console during boot and stored
+ * for telemetry reporting.
+ *
+ * @details
+ * Reads and logs:
+ * - Chip model and revision
+ * - Number of CPU cores
+ * - Unique chip ID (from eFuse MAC address)
+ * - Flash memory size
+ * - Free heap memory available
+ *
+ * @note Required for Milestone 1 (R1.2) - documentation of MCU information
+ */
 void getChipInfo() {
    esp_chip_info_t chipInfo;
    esp_chip_info(&chipInfo);
-   
+
    Serial.println("ESP32 Chip Information:");
    Serial.printf("Model: %d\n", chipInfo.model);
    Serial.printf("Cores: %d\n", chipInfo.cores);
@@ -552,9 +673,25 @@ void getChipInfo() {
  }
   
 
+/**
+ * @brief Display boot sequence on OLED
+ *
+ * Shows satellite initialization sequence with animated logo, chip information,
+ * and voltage readings. Displays diagnostic information for debugging and
+ * demonstrates all OLED capabilities.
+ *
+ * @details Boot sequence shows:
+ * 1. Animated expanding circle (CADSE logo)
+ * 2. Title and developer information
+ * 3. Chip ID, Flash memory, and available heap
+ * 4. Battery and USB voltage readings
+ * 5. Low battery warning if applicable
+ *
+ * @note Satisfies requirement R2.1 - Boot sequence display
+ */
 void displayBootSequence() {
    display.clearDisplay();
-   
+
    // CADSE Logo animation
    for (int i = 0; i < SCREEN_HEIGHT / 2; i += 4) {
      display.clearDisplay();
@@ -562,7 +699,7 @@ void displayBootSequence() {
      display.display();
      delay(50);
    }
-   
+
    display.clearDisplay();
    display.setCursor(0, 0);
    display.println("  CADSE v5");
@@ -607,6 +744,23 @@ void displayBootSequence() {
  }
   
 
+/**
+ * @brief MQTT message callback handler
+ *
+ * Processes telecommands received from ground station via MQTT. Interprets
+ * command strings and performs corresponding satellite operations.
+ *
+ * @param topic MQTT topic that message was received on
+ * @param payload Pointer to message payload bytes
+ * @param length Length of payload in bytes
+ *
+ * @details Supported commands (published to cadse/2024/{boardId}/tc):
+ * - "MX" - Change to mode X (0-5), sends audio/visual feedback
+ * - "SET_DEFAULT_MX" - Set default startup mode X (stored in NVS)
+ * - "OTA_RESTART" - Trigger restart for over-the-air update
+ *
+ * @note Satisfies requirements R5 and R5.1 (telecommand reception)
+ */
 void handleMQTTCallback(char* topic, byte* payload, unsigned int length) {
    // Convert payload to string
    char message[length + 1];
@@ -614,12 +768,12 @@ void handleMQTTCallback(char* topic, byte* payload, unsigned int length) {
      message[i] = (char)payload[i];
    }
    message[length] = '\0';
-   
+
    Serial.print("Message received: [");
    Serial.print(topic);
    Serial.print("] ");
    Serial.println(message);
-   
+
    // Process commands
    if (String(topic) == mqttCommandTopic) {
      String command = String(message);
@@ -658,11 +812,35 @@ void handleMQTTCallback(char* topic, byte* payload, unsigned int length) {
  }
   
 
+/**
+ * @brief Send telemetry data to ground station
+ *
+ * Publishes housekeeping data to MQTT broker every second as required by R4.1.
+ * Telemetry includes system status, sensor readings, connectivity information,
+ * and touch sensor values.
+ *
+ * @details
+ * Telemetry includes (per R4.2):
+ * - Current mode and default mode
+ * - Battery and USB voltages
+ * - Acceleration (simulated, 3 axes)
+ * - Angular rate (simulated, 3 axes)
+ * - Environmental data (temperature, humidity, pressure)
+ * - WiFi RSSI (signal strength)
+ * - Touch sensor values
+ * - System uptime and heap status
+ *
+ * @note
+ * - Called once per second from main loop
+ * - Requires active MQTT connection
+ * - Publishes to: cadse/2024/{boardId}/tm
+ * - Satisfies requirements R4, R4.1, R4.2
+ */
 void sendTelemetry() {
    if (mqttClient.connected()) {
      String telemetryJson = createJSONTelemetry();
      bool success = mqttClient.publish(mqttTelemetryTopic.c_str(), telemetryJson.c_str());
-     
+
      if (success) {
        Serial.println("Telemetry sent: " + telemetryJson);
      } else {
